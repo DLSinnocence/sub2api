@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -64,7 +67,7 @@ type cachedCopilotToken struct {
 
 // CopilotTokenProvider manages the exchange of GitHub OAuth access_tokens
 // for short-lived Copilot API JWTs. Tokens are cached per access_token
-// and automatically refreshed before expiry.
+// (keyed by SHA-256 fingerprint) and automatically refreshed before expiry.
 //
 // The exchange flow follows the same protocol that the VS Code Copilot
 // extension uses:
@@ -75,7 +78,8 @@ type cachedCopilotToken struct {
 type CopilotTokenProvider struct {
 	httpUpstream HTTPUpstream
 	mu           sync.RWMutex
-	cache        map[string]*cachedCopilotToken
+	cache        map[string]*cachedCopilotToken // keyed by SHA-256 of github token
+	sf           singleflight.Group
 }
 
 // NewCopilotTokenProvider creates a new provider instance.
@@ -86,47 +90,93 @@ func NewCopilotTokenProvider(httpUpstream HTTPUpstream) *CopilotTokenProvider {
 	}
 }
 
+// tokenFingerprint returns a SHA-256 hex digest of the token, used as
+// the cache key to avoid storing raw credentials in memory.
+func tokenFingerprint(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
 // GetCopilotAPIToken returns a valid Copilot API token and the resolved
 // API endpoint for the given GitHub access_token. Cached tokens are reused
 // until they are within copilotTokenExpiryBuffer of expiry.
+//
+// Uses singleflight to deduplicate concurrent exchange requests for the
+// same access_token, preventing thundering herd on cache miss/expiry.
 func (p *CopilotTokenProvider) GetCopilotAPIToken(ctx context.Context, githubAccessToken string, proxyURL string) (token string, apiEndpoint string, err error) {
+	githubAccessToken = strings.TrimSpace(githubAccessToken)
 	if githubAccessToken == "" {
 		return "", "", fmt.Errorf("copilot: github access token is empty")
 	}
 
+	cacheKey := tokenFingerprint(githubAccessToken)
+
 	// Fast path: read-lock check for cached token.
 	p.mu.RLock()
-	if cached, ok := p.cache[githubAccessToken]; ok && cached.expiresAt.After(time.Now().Add(copilotTokenExpiryBuffer)) {
+	if cached, ok := p.cache[cacheKey]; ok && cached.expiresAt.After(time.Now().Add(copilotTokenExpiryBuffer)) {
 		p.mu.RUnlock()
 		return cached.token, cached.apiEndpoint, nil
 	}
 	p.mu.RUnlock()
 
-	// Slow path: exchange token and update cache.
-	apiToken, err := p.exchangeToken(ctx, githubAccessToken, proxyURL)
+	// Slow path: use singleflight to deduplicate concurrent exchanges
+	// for the same token.
+	type tokenResult struct {
+		token       string
+		apiEndpoint string
+	}
+
+	val, err, _ := p.sf.Do(cacheKey, func() (any, error) {
+		// Double-check under singleflight: another goroutine may have
+		// already refreshed the cache while we were waiting.
+		p.mu.RLock()
+		if cached, ok := p.cache[cacheKey]; ok && cached.expiresAt.After(time.Now().Add(copilotTokenExpiryBuffer)) {
+			p.mu.RUnlock()
+			return &tokenResult{token: cached.token, apiEndpoint: cached.apiEndpoint}, nil
+		}
+		p.mu.RUnlock()
+
+		// Exchange token.
+		apiToken, exchangeErr := p.exchangeToken(ctx, githubAccessToken, proxyURL)
+		if exchangeErr != nil {
+			return nil, exchangeErr
+		}
+
+		resolvedEndpoint := copilotDefaultBaseURL
+		if ep := strings.TrimRight(apiToken.Endpoints.API, "/"); ep != "" {
+			resolvedEndpoint = ep
+		}
+
+		expiresAt := time.Now().Add(copilotTokenCacheTTL)
+		if apiToken.ExpiresAt > 0 {
+			expiresAt = time.Unix(apiToken.ExpiresAt, 0)
+		}
+
+		// Update cache and evict expired entries.
+		p.mu.Lock()
+		p.cache[cacheKey] = &cachedCopilotToken{
+			token:       apiToken.Token,
+			apiEndpoint: resolvedEndpoint,
+			expiresAt:   expiresAt,
+		}
+		// Opportunistic eviction of expired entries to prevent unbounded growth.
+		now := time.Now()
+		for k, v := range p.cache {
+			if v.expiresAt.Before(now) {
+				delete(p.cache, k)
+			}
+		}
+		p.mu.Unlock()
+
+		return &tokenResult{token: apiToken.Token, apiEndpoint: resolvedEndpoint}, nil
+	})
+
 	if err != nil {
 		return "", "", err
 	}
 
-	apiEndpoint = copilotDefaultBaseURL
-	if ep := strings.TrimRight(apiToken.Endpoints.API, "/"); ep != "" {
-		apiEndpoint = ep
-	}
-
-	expiresAt := time.Now().Add(copilotTokenCacheTTL)
-	if apiToken.ExpiresAt > 0 {
-		expiresAt = time.Unix(apiToken.ExpiresAt, 0)
-	}
-
-	p.mu.Lock()
-	p.cache[githubAccessToken] = &cachedCopilotToken{
-		token:       apiToken.Token,
-		apiEndpoint: apiEndpoint,
-		expiresAt:   expiresAt,
-	}
-	p.mu.Unlock()
-
-	return apiToken.Token, apiEndpoint, nil
+	result := val.(*tokenResult)
+	return result.token, result.apiEndpoint, nil
 }
 
 // exchangeToken performs the actual HTTP request to exchange a GitHub

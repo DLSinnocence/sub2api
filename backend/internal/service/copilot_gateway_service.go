@@ -22,7 +22,6 @@ const (
 	// Copilot API request header constants.
 	// These mimic the VS Code Copilot extension to ensure the upstream
 	// API accepts the request without flagging it as an unknown client.
-	copilotBaseURL       = "https://api.githubcopilot.com"
 	copilotUserAgent     = "GitHubCopilotChat/0.35.0"
 	copilotEditorVersion = "vscode/1.107.0"
 	copilotPluginVersion = "copilot-chat/0.35.0"
@@ -134,7 +133,13 @@ func (s *CopilotGatewayService) forward(
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
 	// 4. Build upstream URL.
-	targetURL := strings.TrimRight(apiEndpoint, "/") + upstreamPath
+	// Honor account-level base_url override; fall back to the endpoint
+	// returned by the token exchange (or its default).
+	baseURL := strings.TrimSpace(account.GetCopilotBaseURL())
+	if baseURL == "" || baseURL == copilotDefaultBaseURL {
+		baseURL = apiEndpoint
+	}
+	targetURL := strings.TrimRight(baseURL, "/") + upstreamPath
 
 	// 5. Build upstream HTTP request.
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
@@ -146,12 +151,6 @@ func (s *CopilotGatewayService) forward(
 	// 6. Send request to upstream.
 	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{
-				"type":    "upstream_error",
-				"message": "Copilot upstream request failed",
-			},
-		})
 		return nil, fmt.Errorf("copilot: upstream request failed: %w", err)
 	}
 
@@ -182,7 +181,9 @@ func (s *CopilotGatewayService) forward(
 	if reqStream {
 		s.streamResponse(c, resp, reqLog)
 	} else {
-		s.nonStreamResponse(c, resp, reqLog)
+		if err := s.nonStreamResponse(c, resp, reqLog); err != nil {
+			return nil, err
+		}
 	}
 
 	return &CopilotForwardResult{
@@ -233,7 +234,7 @@ func (s *CopilotGatewayService) streamResponse(c *gin.Context, resp *http.Respon
 }
 
 // nonStreamResponse reads the full upstream response and writes it to the client.
-func (s *CopilotGatewayService) nonStreamResponse(c *gin.Context, resp *http.Response, reqLog *zap.Logger) {
+func (s *CopilotGatewayService) nonStreamResponse(c *gin.Context, resp *http.Response, reqLog *zap.Logger) error {
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			reqLog.Warn("copilot: close upstream response body error", zap.Error(err))
@@ -243,13 +244,7 @@ func (s *CopilotGatewayService) nonStreamResponse(c *gin.Context, resp *http.Res
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, copilotMaxUpstreamResponseSize))
 	if err != nil {
 		reqLog.Error("copilot: failed to read upstream response", zap.Error(err))
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{
-				"type":    "upstream_error",
-				"message": "Failed to read Copilot upstream response",
-			},
-		})
-		return
+		return fmt.Errorf("copilot: failed to read upstream response: %w", err)
 	}
 
 	for key, values := range resp.Header {
@@ -262,6 +257,7 @@ func (s *CopilotGatewayService) nonStreamResponse(c *gin.Context, resp *http.Res
 		}
 	}
 	c.Data(resp.StatusCode, "application/json", respBody)
+	return nil
 }
 
 // ShouldFailoverCopilotUpstreamError returns true if the upstream error
@@ -292,7 +288,12 @@ func (s *CopilotGatewayService) ListModels(ctx context.Context, account *Account
 		return nil, fmt.Errorf("copilot: token exchange failed: %w", err)
 	}
 
-	modelsURL := strings.TrimRight(apiEndpoint, "/") + "/models"
+	// Honor account-level base_url override.
+	baseURL := strings.TrimSpace(account.GetCopilotBaseURL())
+	if baseURL == "" || baseURL == copilotDefaultBaseURL {
+		baseURL = apiEndpoint
+	}
+	modelsURL := strings.TrimRight(baseURL, "/") + "/models"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("copilot: failed to create models request: %w", err)

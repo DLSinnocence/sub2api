@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
 
-	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -134,7 +136,7 @@ func (h *CopilotGatewayHandler) handleRequest(
 	)
 
 	// Read and validate request body.
-	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
+	body, err := httputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
@@ -169,6 +171,15 @@ func (h *CopilotGatewayHandler) handleRequest(
 		defer userReleaseFunc()
 	}
 
+	// Check billing eligibility after acquiring slot.
+	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription); err != nil {
+		reqLog.Info("copilot: billing eligibility check failed", zap.Error(err))
+		status, code, message := billingErrorDetails(err)
+		h.errorResponse(c, status, code, message)
+		return
+	}
+
 	// Account selection with failover loop.
 	var failedAccountIDs []int64
 	for attempt := 0; attempt <= h.maxAccountSwitches; attempt++ {
@@ -190,11 +201,47 @@ func (h *CopilotGatewayHandler) handleRequest(
 		})
 
 		if fwdErr == nil {
-			_ = result
 			reqLog.Info("copilot: request forwarded successfully",
 				zap.Int64("account_id", account.ID),
 				zap.Duration("duration", time.Since(requestStart)),
 			)
+
+			// Submit usage record asynchronously.
+			// Note: Copilot streaming responses are forwarded as-is without
+			// token usage parsing, so we record a basic usage entry for
+			// billing/audit purposes. Token counts will be zero.
+			userAgent := c.GetHeader("User-Agent")
+			clientIP := ip.GetClientIP(c)
+			requestPayloadHash := service.HashUsageRequestPayload(body)
+			inboundEndpoint := GetInboundEndpoint(c)
+			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
+			h.submitUsageRecordTask(func(ctx context.Context) {
+				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+					Result: &service.ForwardResult{
+						Model:         reqModel,
+						UpstreamModel: result.UpstreamModel,
+					},
+					APIKey:             apiKey,
+					User:               apiKey.User,
+					Account:            account,
+					Subscription:       subscription,
+					InboundEndpoint:    inboundEndpoint,
+					UpstreamEndpoint:   upstreamEndpoint,
+					UserAgent:          userAgent,
+					IPAddress:          clientIP,
+					RequestPayloadHash: requestPayloadHash,
+					APIKeyService:      h.apiKeyService,
+				}); err != nil {
+					logger.L().With(
+						zap.String("component", "handler.copilot_gateway."+endpoint),
+						zap.Int64("user_id", subject.UserID),
+						zap.Int64("api_key_id", apiKey.ID),
+						zap.Any("group_id", apiKey.GroupID),
+						zap.String("model", reqModel),
+						zap.Int64("account_id", account.ID),
+					).Error("copilot: record usage failed", zap.Error(err))
+				}
+			})
 			return
 		}
 
@@ -215,16 +262,20 @@ func (h *CopilotGatewayHandler) handleRequest(
 			zap.Int64("account_id", account.ID),
 			zap.Error(fwdErr),
 		)
-		if upstreamErr != nil {
-			c.Data(upstreamErr.StatusCode, "application/json", upstreamErr.Body)
-		} else {
-			h.errorResponse(c, http.StatusBadGateway, "api_error", "Copilot request failed")
+		if !c.Writer.Written() {
+			if upstreamErr != nil {
+				c.Data(upstreamErr.StatusCode, "application/json", upstreamErr.Body)
+			} else {
+				h.errorResponse(c, http.StatusBadGateway, "api_error", "Copilot request failed")
+			}
 		}
 		return
 	}
 
 	// All accounts exhausted.
-	h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "All Copilot accounts exhausted after failover")
+	if !c.Writer.Written() {
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "All Copilot accounts exhausted after failover")
+	}
 }
 
 // selectAccount picks an available Copilot account for the given API key.
@@ -270,4 +321,28 @@ func (h *CopilotGatewayHandler) handleConcurrencyError(c *gin.Context, err error
 		return
 	}
 	h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Too many concurrent requests")
+}
+
+// submitUsageRecordTask submits a usage recording task to the bounded worker
+// pool. Falls back to synchronous execution if the pool is not injected.
+func (h *CopilotGatewayHandler) submitUsageRecordTask(task service.UsageRecordTask) {
+	if task == nil {
+		return
+	}
+	if h.usageRecordWorkerPool != nil {
+		h.usageRecordWorkerPool.Submit(task)
+		return
+	}
+	// Fallback: synchronous execution with timeout + panic recovery.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.L().With(
+				zap.String("component", "handler.copilot_gateway"),
+				zap.Any("panic", recovered),
+			).Error("copilot: usage record task panic recovered")
+		}
+	}()
+	task(ctx)
 }

@@ -85,7 +85,12 @@ func RegisterGatewayRoutes(
 			case service.PlatformOpenAI:
 				h.OpenAIGateway.Responses(c)
 			case service.PlatformCopilot:
-				h.CopilotGateway.Responses(c)
+				c.JSON(http.StatusNotFound, gin.H{
+					"error": gin.H{
+						"type":    "not_found_error",
+						"message": "Responses subresources are not supported for Copilot platform",
+					},
+				})
 			default:
 				h.Gateway.Responses(c)
 			}
@@ -130,8 +135,23 @@ func RegisterGatewayRoutes(
 			h.Gateway.Responses(c)
 		}
 	}
+	responsesSubpathHandler := func(c *gin.Context) {
+		switch getGroupPlatform(c) {
+		case service.PlatformOpenAI:
+			h.OpenAIGateway.Responses(c)
+		case service.PlatformCopilot:
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": gin.H{
+					"type":    "not_found_error",
+					"message": "Responses subresources are not supported for Copilot platform",
+				},
+			})
+		default:
+			h.Gateway.Responses(c)
+		}
+	}
 	r.POST("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesHandler)
-	r.POST("/responses/*subpath", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesHandler)
+	r.POST("/responses/*subpath", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, responsesSubpathHandler)
 	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.OpenAIGateway.ResponsesWebSocket)
 	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
 	r.POST("/chat/completions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, func(c *gin.Context) {
