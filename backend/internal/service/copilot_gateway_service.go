@@ -356,8 +356,22 @@ func applyCopilotHeaders(r *http.Request, apiToken string, body []byte) {
 }
 
 // isCopilotAgentInitiated detects whether the request is agent-initiated
-// (tool callback / continuation) rather than user-initiated. Copilot uses
-// the X-Initiator header for billing purposes.
+// (tool callbacks, continuations) rather than user-initiated. Copilot uses
+// the X-Initiator header for billing:
+//   - "user"  → consumes premium request quota
+//   - "agent" → free (tool loops, continuations)
+//
+// The challenge: Claude Code sends tool results as role:"user" messages with
+// content type "tool_result". After translation, the tool_result part may become
+// a separate role:"tool" message, but if the original message also contained text,
+// a role:"user" message is emitted AFTER the tool message, making the last message
+// appear user-initiated when it's actually part of an agent tool loop.
+//
+// We detect agent status by checking:
+//  1. Last message role is "assistant" or "tool" → agent
+//  2. Last message is "user" but contains tool_result content → agent (tool loop)
+//  3. Last message is "user" but preceding message is assistant with tool_use → agent
+//  4. Responses API: any function_call / tool-related types in history → agent
 func isCopilotAgentInitiated(body []byte) bool {
 	if len(body) == 0 {
 		return false
@@ -369,25 +383,51 @@ func isCopilotAgentInitiated(body []byte) bool {
 		if len(arr) == 0 {
 			return false
 		}
-		// Find the last message role.
+
+		// Find the last message with a role.
+		lastRole := ""
 		for i := len(arr) - 1; i >= 0; i-- {
-			role := arr[i].Get("role").String()
-			if role == "assistant" || role == "tool" {
-				return true
+			if r := arr[i].Get("role").String(); r != "" {
+				lastRole = r
+				break
 			}
-			if role == "user" {
-				// Check if it contains tool_result content (indicating a tool loop).
-				content := arr[i].Get("content")
-				if content.IsArray() {
-					for _, part := range content.Array() {
-						if part.Get("type").String() == "tool_result" {
-							return true
+		}
+
+		// If last message is assistant or tool, clearly agent-initiated.
+		if lastRole == "assistant" || lastRole == "tool" {
+			return true
+		}
+
+		// If last message is "user", check whether it contains tool results
+		// (indicating a tool-loop continuation) or if the preceding message
+		// is an assistant tool_use.
+		if lastRole == "user" {
+			// Check if the last user message contains tool_result content.
+			lastContent := arr[len(arr)-1].Get("content")
+			if lastContent.Exists() && lastContent.IsArray() {
+				for _, part := range lastContent.Array() {
+					if part.Get("type").String() == "tool_result" {
+						return true
+					}
+				}
+			}
+			// Check if the second-to-last message is an assistant with tool_use.
+			if len(arr) >= 2 {
+				prev := arr[len(arr)-2]
+				if prev.Get("role").String() == "assistant" {
+					prevContent := prev.Get("content")
+					if prevContent.Exists() && prevContent.IsArray() {
+						for _, part := range prevContent.Array() {
+							if part.Get("type").String() == "tool_use" {
+								return true
+							}
 						}
 					}
 				}
-				return false
 			}
 		}
+
+		return false
 	}
 
 	// Responses API: check input array.
@@ -396,13 +436,30 @@ func isCopilotAgentInitiated(body []byte) bool {
 		if len(arr) == 0 {
 			return false
 		}
+
+		// Check last item — direct indicators.
 		last := arr[len(arr)-1]
 		if last.Get("role").String() == "assistant" {
 			return true
 		}
 		switch last.Get("type").String() {
-		case "function_call", "function_call_output", "function_call_response":
+		case "function_call", "function_call_arguments", "computer_call":
 			return true
+		case "function_call_output", "function_call_response", "tool_result", "computer_call_output":
+			return true
+		}
+
+		// If last item is user-role, check for prior non-user items
+		// that indicate this is a continuation rather than a fresh prompt.
+		for _, item := range arr {
+			if item.Get("role").String() == "assistant" {
+				return true
+			}
+			switch item.Get("type").String() {
+			case "function_call", "function_call_output", "function_call_response",
+				"function_call_arguments", "computer_call", "computer_call_output":
+				return true
+			}
 		}
 	}
 

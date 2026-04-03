@@ -301,7 +301,7 @@ func TestIsCopilotAgentInitiated(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "user message",
+			name:     "user message only",
 			body:     `{"messages":[{"role":"user","content":"hello"}]}`,
 			expected: false,
 		},
@@ -316,14 +316,59 @@ func TestIsCopilotAgentInitiated(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "last user contains tool_result content",
+			body:     `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"file contents..."}]}]}`,
+			expected: true,
+		},
+		{
+			name:     "last user preceded by assistant with tool_use",
+			body:     `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"user","content":"some text"}]}`,
+			expected: true,
+		},
+		{
+			name:     "genuine multi-turn no tools",
+			body:     `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`,
+			expected: false,
+		},
+		{
+			name:     "genuine follow-up after completed tool history",
+			body:     `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"tool","tool_call_id":"tu1","content":"file data"},{"role":"assistant","content":"I read the file."},{"role":"user","content":"What did we do so far?"}]}`,
+			expected: false,
+		},
+		{
 			name:     "responses API function_call_output",
 			body:     `{"input":[{"type":"function_call_output","output":"done"}]}`,
 			expected: true,
 		},
 		{
-			name:     "responses API user input",
+			name:     "responses API function_call_arguments",
+			body:     `{"input":[{"type":"function_call_arguments","arguments":"{}"}]}`,
+			expected: true,
+		},
+		{
+			name:     "responses API computer_call",
+			body:     `{"input":[{"type":"computer_call","action":"click"}]}`,
+			expected: true,
+		},
+		{
+			name:     "responses API computer_call_output",
+			body:     `{"input":[{"type":"computer_call_output","output":"screenshot"}]}`,
+			expected: true,
+		},
+		{
+			name:     "responses API user input only",
 			body:     `{"input":[{"role":"user","content":"hello"}]}`,
 			expected: false,
+		},
+		{
+			name:     "responses API last user but history has assistant",
+			body:     `{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I can help"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Do X"}]}]}`,
+			expected: true,
+		},
+		{
+			name:     "responses API last user but history has function_call",
+			body:     `{"input":[{"type":"function_call","name":"tool1","arguments":"{}"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`,
+			expected: true,
 		},
 	}
 
