@@ -174,6 +174,8 @@
           :data="subscriptions"
           :loading="loading"
           :server-side-sort="true"
+          default-sort-key="created_at"
+          default-sort-order="desc"
           @sort="handleSort"
         >
           <template #cell-user="{ row }">
@@ -966,7 +968,7 @@ const platformFilterOptions = computed(() => [
   { value: 'openai', label: 'OpenAI' },
   { value: 'gemini', label: 'Gemini' },
   { value: 'antigravity', label: 'Antigravity' },
-  { value: 'sora', label: 'Sora' }
+  { value: 'copilot', label: 'Copilot' }
 ])
 
 // Group options for assign (only subscription type groups)

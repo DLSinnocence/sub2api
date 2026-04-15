@@ -116,9 +116,6 @@ const labelClass = computed(() => {
   if (props.platform === 'gemini') {
     return `${base} bg-blue-200/60 text-blue-800 dark:bg-blue-800/40 dark:text-blue-300`
   }
-  if (props.platform === 'sora') {
-    return `${base} bg-rose-200/60 text-rose-800 dark:bg-rose-800/40 dark:text-rose-300`
-  }
   return `${base} bg-violet-200/60 text-violet-800 dark:bg-violet-800/40 dark:text-violet-300`
 })
 
@@ -140,10 +137,10 @@ const badgeClass = computed(() => {
       ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
       : 'bg-sky-50 text-sky-700 dark:bg-sky-900/20 dark:text-sky-400'
   }
-  if (props.platform === 'sora') {
+  if (props.platform === 'copilot') {
     return isSubscription.value
-      ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400'
-      : 'bg-rose-50 text-rose-700 dark:bg-rose-900/20 dark:text-rose-400'
+      ? 'bg-slate-100 text-slate-700 dark:bg-slate-900/30 dark:text-slate-300'
+      : 'bg-slate-50 text-slate-700 dark:bg-slate-900/20 dark:text-slate-300'
   }
   // Fallback: original colors
   return isSubscription.value

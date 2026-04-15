@@ -19,11 +19,9 @@
   <svg v-else-if="platform === 'antigravity'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
     <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" />
   </svg>
-  <!-- Sora logo (sparkle) -->
-  <svg v-else-if="platform === 'sora'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
-    <path
-      d="M12 2.5l2.1 4.7 5.1.5-3.9 3.4 1.2 5-4.5-2.6-4.5 2.6 1.2-5-3.9-3.4 5.1-.5L12 2.5z"
-    />
+  <!-- Copilot logo (simple spark/face mark) -->
+  <svg v-else-if="platform === 'copilot'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 2a5 5 0 0 0-5 5v1.2A4.8 4.8 0 0 0 3 13v3a4 4 0 0 0 4 4h1.5a2.5 2.5 0 0 0 2.3 1.5h2.4a2.5 2.5 0 0 0 2.3-1.5H17a4 4 0 0 0 4-4v-3a4.8 4.8 0 0 0-4-4.8V7a5 5 0 0 0-5-5Zm-2.5 9.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5Zm5 0a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5ZM9 17h6a3 3 0 0 1-6 0Z" />
   </svg>
   <!-- Fallback: generic platform icon -->
   <svg v-else :class="sizeClass" fill="currentColor" viewBox="0 0 24 24">

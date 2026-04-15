@@ -30,6 +30,8 @@ type AdminHandlers struct {
 	TLSFingerprintProfile *admin.TLSFingerprintProfileHandler
 	APIKey                *admin.AdminAPIKeyHandler
 	ScheduledTest         *admin.ScheduledTestHandler
+	Channel               *admin.ChannelHandler
+	Payment               *admin.PaymentHandler
 }
 
 // Handlers contains all HTTP handlers
@@ -45,10 +47,10 @@ type Handlers struct {
 	Gateway        *GatewayHandler
 	OpenAIGateway  *OpenAIGatewayHandler
 	CopilotGateway *CopilotGatewayHandler
-	SoraGateway    *SoraGatewayHandler
-	SoraClient     *SoraClientHandler
 	Setting        *SettingHandler
 	Totp           *TotpHandler
+	Payment        *PaymentHandler
+	PaymentWebhook *PaymentWebhookHandler
 }
 
 // BuildInfo contains build-time information
