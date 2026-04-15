@@ -15,6 +15,7 @@ This directory contains files for deploying Sub2API on Linux servers.
 |------|-------------|
 | `docker-compose.yml` | Docker Compose configuration (named volumes) |
 | `docker-compose.local.yml` | Docker Compose configuration (local directories, easy migration) |
+| `docker-compose.fork.yml` | Docker Compose configuration that builds the current fork from local source |
 | `docker-deploy.sh` | **One-click Docker deployment script (recommended)** |
 | `.env.example` | Docker environment variables template |
 | `DOCKER.md` | Docker Hub documentation |
@@ -96,6 +97,75 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 # Access Web UI
 # http://localhost:8080
 ```
+
+### Method 3: Deploy Your Fork From Local Source
+
+Use this when you want Docker Compose to build and run the current fork
+instead of pulling `weishaw/sub2api:latest`.
+
+```bash
+# Clone your fork
+git clone https://github.com/kunish/sub2api.git
+cd sub2api/deploy
+
+# Configure environment
+cp .env.example .env
+mkdir -p data postgres_data redis_data
+
+# Build and start your fork
+docker compose -f docker-compose.fork.yml up -d --build
+
+# View logs
+docker compose -f docker-compose.fork.yml logs -f sub2api
+```
+
+`docker-compose.fork.yml` keeps the same runtime layout as
+`docker-compose.local.yml`, but changes the app service to:
+
+- build the image from the repository root (`..`)
+- tag the built image locally (`SUB2API_IMAGE_NAME`)
+- keep app/db/redis data in `./data`, `./postgres_data`, `./redis_data`
+
+This makes upgrades easy:
+
+```bash
+git pull
+docker compose -f docker-compose.fork.yml up -d --build
+```
+
+### Replacing an Existing Official Docker Compose Deployment
+
+If you already deployed the upstream/original version with local directories,
+you can switch to the fork in-place with minimal downtime:
+
+```bash
+# 1. Stop the old stack in the existing deployment directory
+docker compose -f docker-compose.local.yml down
+
+# 2. Back up the whole deployment directory
+cd ..
+tar czf sub2api-backup-before-fork.tar.gz <old-deploy-dir>/
+
+# 3. Copy these files from the old deployment into this fork's deploy dir
+#    - .env
+#    - data/
+#    - postgres_data/
+#    - redis_data/
+
+# 4. Start the fork stack using the copied data
+cd sub2api/deploy
+docker compose -f docker-compose.fork.yml up -d --build
+```
+
+Important notes:
+
+- Keep `JWT_SECRET` and `TOTP_ENCRYPTION_KEY` from the old `.env`, otherwise all
+  users will be logged out and existing 2FA secrets may break.
+- If your reverse proxy points to the old container name, keep
+  `SUB2API_CONTAINER_NAME=sub2api` so the integration stays unchanged.
+- If the old deployment used named volumes instead of local directories, migrate
+  those volumes to directories first or attach the existing external Postgres and
+  Redis services to `docker-compose.standalone.yml`.
 
 ### Deployment Version Comparison
 
